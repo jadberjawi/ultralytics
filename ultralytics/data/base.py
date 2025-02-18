@@ -152,13 +152,15 @@ class BaseDataset(Dataset):
         """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
         if im is None:  # not cached in RAM
-            if fn.exists():  # load npy
+            if f.endswith('.npy'):  # Load .npy file
                 try:
-                    im = np.load(fn)
+                    im = np.load(f)  # Load as NumPy array
+                    if im.shape[-1] != 4:  # Ensure it's 4-channel
+                        raise ValueError(f"Invalid `.npy` format: {f} has shape {im.shape}")
                 except Exception as e:
-                    LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
-                    Path(fn).unlink(missing_ok=True)
-                    im = cv2.imread(f)  # BGR
+                    LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt `.npy` file {f} due to: {e}")
+                    Path(f).unlink(missing_ok=True)
+                    raise FileNotFoundError(f"Corrupt .npy file: {f}")
             else:  # read image
                 im = cv2.imread(f)  # BGR
             if im is None:
@@ -238,14 +240,25 @@ class BaseDataset(Dataset):
 
     def check_cache_ram(self, safety_margin=0.5):
         """Check image caching requirements vs available memory."""
-        b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-        n = min(self.ni, 30)  # extrapolate from 30 random images
+        b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabyte
+        n = min(self.ni, 30)  # extrapolate from 30 random image
         for _ in range(n):
-            im = cv2.imread(random.choice(self.im_files))  # sample image
-            if im is None:
-                continue
-            ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
-            b += im.nbytes * ratio**2
+            img_file = random.choice(self.im_files)  # Randomly select an image
+            im = None  # Initialize im to None
+            
+            try:
+                if img_file.endswith(".npy"):
+                    im = np.load(img_file)  # Load `.npy` image
+                else:
+                    im = cv2.imread(img_file)  # Load normal image
+
+                if im is not None:  # Process only valid images
+                    ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
+                    b += im.nbytes * ratio**2  # Estimate memory usage
+                    
+            except Exception as e:
+                LOGGER.warning(f"WARNING ⚠️ Failed to load image {img_file}: {e}")
+
         mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
         mem = psutil.virtual_memory()
         if mem_required > mem.available:

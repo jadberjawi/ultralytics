@@ -294,7 +294,7 @@ class BaseModel(torch.nn.Module):
 class DetectionModel(BaseModel):
     """YOLO detection model."""
 
-    def __init__(self, cfg="yolo11n.yaml", ch=3, nc=None, verbose=True):  # model, input channels, number of classes
+    def __init__(self, cfg="yolo11n.yaml", ch=4, nc=None, verbose=True):  # model, input channels, number of classes
         """Initialize the YOLO detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
@@ -1016,6 +1016,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in base_modules:
             c1, c2 = ch[f], args[0]
+            # MODIFICATIONS HERE: change input channels of the first layer to 4
+            if i == 0:  # First convolution layer
+                c1 = 4  # Change input channels to 4
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             if m is C2fAttn:  # set 1) embed channels and 2) num heads

@@ -35,7 +35,7 @@ from ultralytics.utils.downloads import download, safe_download, unzip_file
 from ultralytics.utils.ops import segments2boxes
 
 HELP_URL = "See https://docs.ultralytics.com/datasets for dataset formatting guidance."
-IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm", "heic"}  # image suffixes
+IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm", "heic", "npy"}  # image suffixes
 VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # video suffixes
 PIN_MEMORY = str(os.getenv("PIN_MEMORY", True)).lower() == "true"  # global pin_memory for dataloaders
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
@@ -74,23 +74,34 @@ def verify_image(args):
     (im_file, cls), prefix = args
     # Number (found, corrupt), message
     nf, nc, msg = 0, 0, ""
+    # MODIFICATION HERE: I added the following line to check if the image is a .npy file and load it as a NumPy array and check if it has 4 channels and save the shape
     try:
-        im = Image.open(im_file)
-        im.verify()  # PIL verify
-        shape = exif_size(im)  # image size
-        shape = (shape[1], shape[0])  # hw
+        if im_file.endswith('.npy'):  # ✅ Handle `.npy` images separately
+            im = np.load(im_file)  # Load as NumPy array
+            if im.shape[-1] != 4:  # Ensure 4-channel (RGB + IR)
+                raise ValueError(f"Invalid `.npy` format: {im_file} has shape {im.shape}")
+            shape = im.shape[:2]  # (H, W)
+        else:  # ✅ Handle traditional images (JPEG, PNG, etc.) as before
+            im = Image.open(im_file)
+            im.verify()  # PIL verify
+            shape = exif_size(im)  # image size
+            shape = (shape[1], shape[0])  # (H, W)
+            
+            assert im.format.lower() in IMG_FORMATS, f"Invalid image format {im.format}. {FORMATS_HELP_MSG}"
+            if im.format.lower() in {"jpg", "jpeg"}:
+                with open(im_file, "rb") as f:
+                    f.seek(-2, 2)
+                    if f.read() != b"\xff\xd9":  # corrupt JPEG
+                        ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                        msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+
         assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-        assert im.format.lower() in IMG_FORMATS, f"Invalid image format {im.format}. {FORMATS_HELP_MSG}"
-        if im.format.lower() in {"jpg", "jpeg"}:
-            with open(im_file, "rb") as f:
-                f.seek(-2, 2)
-                if f.read() != b"\xff\xd9":  # corrupt JPEG
-                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
-                    msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
         nf = 1
+
     except Exception as e:
         nc = 1
         msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
+    
     return (im_file, cls), nf, nc, msg
 
 
@@ -99,22 +110,31 @@ def verify_image_label(args):
     im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    # MODIFICATION HERE: I added the following line to check if the image is a .npy file and load it as a NumPy array and check if it has 4 channels and save the shape
     try:
-        # Verify images
-        im = Image.open(im_file)
-        im.verify()  # PIL verify
-        shape = exif_size(im)  # image size
-        shape = (shape[1], shape[0])  # hw
-        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
-        if im.format.lower() in {"jpg", "jpeg"}:
-            with open(im_file, "rb") as f:
-                f.seek(-2, 2)
-                if f.read() != b"\xff\xd9":  # corrupt JPEG
-                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
-                    msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+        # ✅ Handle `.npy` images separately
+        if im_file.endswith('.npy'):
+            im = np.load(im_file)  # Load as NumPy array
+            if im.shape[-1] != 4:  # Ensure 4-channel (RGB + IR)
+                raise ValueError(f"Invalid `.npy` format: {im_file} has shape {im.shape}")
+            shape = im.shape[:2]  # (H, W)
+        else:  # ✅ Handle traditional images (JPEG, PNG, etc.) as before
+            im = Image.open(im_file)
+            im.verify()  # PIL verify
+            shape = exif_size(im)  # image size
+            shape = (shape[1], shape[0])  # (H, W)
 
-        # Verify labels
+            assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
+            if im.format.lower() in {"jpg", "jpeg"}:
+                with open(im_file, "rb") as f:
+                    f.seek(-2, 2)
+                    if f.read() != b"\xff\xd9":  # corrupt JPEG
+                        ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                        msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+
+        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+
+        # ✅ Keep Unchanged : Verify labels
         if os.path.isfile(lb_file):
             nf = 1  # label found
             with open(lb_file) as f:

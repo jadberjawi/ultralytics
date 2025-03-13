@@ -25,6 +25,8 @@ from ultralytics.utils import (
     yaml_load,
 )
 
+import glob
+import os
 
 class Model(torch.nn.Module):
     """
@@ -555,6 +557,27 @@ class Model(torch.nn.Module):
             self.predictor.args = get_cfg(self.predictor.args, args)
             if "project" in args or "name" in args:
                 self.predictor.save_dir = get_save_dir(self.predictor.args)
+
+        # ✅ MODIFICATIONS HERE: What was happening is that source contains location of the directory where the images are stored and not the location of the image directly 
+        image_files = []
+        if isinstance(source, str) and os.path.isdir(source):
+            image_files = sorted(glob.glob(os.path.join(source, "*.npy")))  # Get all .npy images
+            
+            # Debugging: Ensure images are found
+            if not image_files:
+                raise ValueError(f"🚨 No .npy images found in {source}!")
+            print(f"✅ Found {len(image_files)} .npy images. Example files:\n{image_files[:5]}")
+            # Use the extracted .npy file paths instead of the directory
+            source = image_files
+
+        # Load images as NumPy arrays
+        images = []
+        if image_files:
+            for file in image_files:
+                img = np.load(file)  # Load .npy file
+                images.append(img)
+            source = images
+        
         if prompts and hasattr(self.predictor, "set_prompts"):  # for SAM-type models
             self.predictor.set_prompts(prompts)
         return self.predictor.predict_cli(source=source) if is_cli else self.predictor(source=source, stream=stream)
@@ -848,6 +871,7 @@ class Model(torch.nn.Module):
             >>> results = model.tune(use_ray=True, iterations=20)
             >>> print(results)
         """
+        print("🔍 Inside tuning - First conv layer:", self.model.model[0])  # Debugging line
         self._check_is_pytorch_model()
         if use_ray:
             from ultralytics.utils.tuner import run_ray_tune

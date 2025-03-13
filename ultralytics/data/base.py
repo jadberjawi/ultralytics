@@ -208,8 +208,11 @@ class BaseDataset(Dataset):
         """Saves an image as an *.npy file for faster loading."""
         f = self.npy_files[i]
         if not f.exists():
-            np.save(f.as_posix(), cv2.imread(self.im_files[i]), allow_pickle=False)
-
+            if self.im_files[i].endswith('.npy'):  # If already .npy, just copy
+                im = np.load(self.im_files[i])
+            else:  # Load from regular image formats (.jpg, .png, etc.)
+                im = cv2.imread(self.im_files[i], cv2.IMREAD_UNCHANGED)  # Preserve all channels
+        np.save(f.as_posix(), im, allow_pickle=False)  # Save as `.npy`
     def check_cache_disk(self, safety_margin=0.5):
         """Check image caching requirements vs available disk space."""
         import shutil
@@ -218,7 +221,10 @@ class BaseDataset(Dataset):
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
             im_file = random.choice(self.im_files)
-            im = cv2.imread(im_file)
+            if im_file.endswith(".npy"):  # Load from `.npy`
+                im = np.load(im_file)
+            else:  # Load regular images
+                im = cv2.imread(im_file, cv2.IMREAD_UNCHANGED)
             if im is None:
                 continue
             b += im.nbytes

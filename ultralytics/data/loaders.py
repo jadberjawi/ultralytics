@@ -589,7 +589,9 @@ def autocast_list(source):
     files = []
     for im in source:
         if isinstance(im, (str, Path)):  # filename or uri
-            files.append(Image.open(requests.get(im, stream=True).raw if str(im).startswith("http") else im))
+            # MODOFICATION HERE: SWITCHED THE COMMENTED LINE INTO THE ONE BELOW IT
+            # files.append(Image.open(requests.get(im, stream=True).raw if str(im).startswith("http") else im))
+            files.append(im)
         elif isinstance(im, (Image.Image, np.ndarray)):  # PIL or np Image
             files.append(im)
         else:

@@ -1,14 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.transforms as transforms
-from PIL import Image
-import matplotlib
-matplotlib.use('Agg')  # Prevent runtime error in Google Colab
-import matplotlib.pyplot as plt
-import numpy as np
-
-
 
 # Inception Block A
 class InceptionBlockA(nn.Module):
@@ -102,176 +94,85 @@ class GlobalAttention(nn.Module):
         # 3. Return the pooled attention map (before softmax)
         return attn
 
-def load_npy_image(npy_path):
-    npy_image = np.load(npy_path)  # Shape: (H, W, 4)
-    if npy_image.shape[-1] != 4:
-        raise ValueError(f"Expected 4-channel image (RGB + IR), but got shape {npy_image.shape}")
+# Full MEFA Module
+class MEFA(nn.Module):
+    def __init__(self):
+        super(MEFA, self).__init__()
 
-    # Extract RGB and IR
-    rgb = npy_image[..., :3]  
-    ir = npy_image[..., 3:]  
+        # Initial Inception Blocks
+        self.inception_rgb = InceptionBlockA(in_channels=3)
+        self.inception_ir = InceptionBlockA(in_channels=1)
 
-    # Resize to 640×640
-    from torchvision.transforms.functional import resize
-    rgb_tensor = torch.tensor(rgb, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
-    ir_tensor = torch.tensor(ir, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)  # (1, 1, H, W)
+        # Attention Mechanisms
+        self.local_attn = LocalAttention(in_channels=128)
+        self.global_attn = GlobalAttention(in_channels=128)
 
-    rgb_tensor = F.interpolate(rgb_tensor, size=(640, 640), mode="bilinear", align_corners=False)
-    ir_tensor = F.interpolate(ir_tensor, size=(640, 640), mode="bilinear", align_corners=False)
+        # Second Inception Block (Feature Fusion)
+        self.inception_fused = InceptionBlockA(in_channels=256)
 
-    return rgb_tensor, ir_tensor
-# Load and Process Image
-input_image_path = "test.npy"
+        # Final Convolution to Return 3-Channel Output
+        self.final_conv = nn.Conv2d(in_channels=256, out_channels=3, kernel_size=1)
 
-input_rgb, input_ir = load_npy_image(input_image_path) 
+    def forward(self, x):
+        """
+        x: (B, 4, H, W) - Input 4-channel image (RGB + IR)
+        Returns: (B, 3, H, W) - Processed 3-channel image
+        """
+        if isinstance(x, dict):
+            x = x["img"]  # Extract image batch from YOLO's dataset dictionary
 
-print("Loaded RGB Shape:", input_rgb.shape)  # Expected: (1, 3, 640, 640)
-print("Loaded IR Shape:", input_ir.shape)    # Expected: (1, 1, 640, 640)
+        # Ensure batch dimension is present
+        assert x.ndim == 4, f"Expected 4D input (B, C, H, W), got {x.shape}"
 
-#  1️⃣ Inception Block Section
-inception_block = InceptionBlockA(in_channels=3)
-inception_block_1c = InceptionBlockA(in_channels=1)
+        # Debugging: Print input batch shape
+        print(f"🔍 MEFA Input Shape: {x.shape}")
+        
+        # Split RGB and IR channels
+        rgb, ir = x[:, :3, :, :], x[:, 3:, :, :]
 
-# Forward Pass through Inception Blocks
-in_rgb = inception_block(input_rgb)
-in_ir = inception_block_1c(input_ir)
+        # Apply Initial Inception Blocks
+        f_rgb = self.inception_rgb(rgb)
+        f_ir = self.inception_ir(ir)
 
+        # Apply Local Attention
+        la_rgb = self.local_attn(f_rgb)
+        la_ir = self.local_attn(f_ir)
 
-# 2️⃣ Local Attention Section
-local_attention = LocalAttention(in_channels=128)
+        # Normalize Local Attention
+        attn = torch.softmax(torch.stack([la_rgb, la_ir], dim=1), dim=1)
+        la_rgb, la_ir = attn.unbind(dim=1)
 
-# Apply Local Attention
-la_rgb = local_attention(in_rgb)
-la_ir = local_attention(in_ir)
+        # Multiply by Local Attention Weights
+        f_rgb = f_rgb * la_rgb
+        f_ir = f_ir * la_ir
 
-# Apply Softmax Across Modalities
-attn = torch.softmax(torch.stack([la_rgb, la_ir], dim=1), dim=1)  # Normalize
-la_attn_rgb, la_attn_ir = attn.unbind(dim=1)  # Separate maps
+        # Concatenate Features
+        fused_features = torch.cat([f_rgb, f_ir], dim=1)
 
-# 3️⃣ Element-wise multiplication Section 1
-mul_la_in_rgb = in_rgb * la_attn_rgb
-mul_la_in_ir = in_ir * la_attn_ir
+        # Apply Global Attention
+        ga_rgb = self.global_attn(f_rgb)
+        ga_ir = self.global_attn(f_ir)
 
+        # Upscale Attention Maps to Match Input Size
+        ga_rgb = F.interpolate(ga_rgb, size=(x.shape[2], x.shape[3]), mode="bilinear", align_corners=False)
+        ga_ir = F.interpolate(ga_ir, size=(x.shape[2], x.shape[3]), mode="bilinear", align_corners=False)
 
-# 4️⃣ Concatenate the multiplied values of RGB and IR
-fused_features_1 = torch.cat([mul_la_in_rgb, mul_la_in_ir], dim=1)  # Concatenate along channels
+        # Pass Through Final Inception Block
+        refined_features = self.inception_fused(fused_features)
 
+        # Apply Global Attention
+        final_rgb = refined_features * ga_rgb
+        final_ir = refined_features * ga_ir
 
-# 5️⃣ Global Attention Section
-global_attention = GlobalAttention(in_channels=128)
+        # Concatenate Final Features
+        fused_output = torch.cat([final_rgb, final_ir], dim=1)
 
-# Apply Global Attention to Each Modality Before Local Attention
-ga_rgb = global_attention(in_rgb)
-ga_ir = global_attention(in_ir)
+        # Reduce to 3-Channel Output
+        final_output = self.final_conv(fused_output)
 
-# Upscale Attention Maps to Original Feature Map Size
-g_attn_rgb = F.interpolate(ga_rgb, size=(640, 640), mode="bilinear", align_corners=False)
-g_attn_ir = F.interpolate(ga_ir, size=(640, 640), mode="bilinear", align_corners=False)
+        if final_output is None:
+            raise RuntimeError("❌ MEFA is returning None instead of a tensor!")
 
-ga_test = ga_rgb + ga_ir
-# # Apply Softmax across the modality dimension (so sum = 1 for each region)
-# attn = torch.softmax(torch.stack([ga_rgb, ga_ir], dim=1), dim=1)  # Normalize across modalities
-# attn_rgb, attn_ir = attn.unbind(dim=1)  # Separate the attention maps
+        print(f"✅ MEFA Output Shape: {final_output.shape}")  # Debugging
 
-# # Upscale Attention Maps to Original Feature Map Size
-# g_attn_rgb = F.interpolate(attn_rgb, size=(640, 640), mode="bilinear", align_corners=False)
-# g_attn_ir = F.interpolate(attn_ir, size=(640, 640), mode="bilinear", align_corners=False)
-
-
-# 6️⃣ Last Inception Block Section
-inception_block_2 = InceptionBlockA(in_channels=256)
-
-# Pass the fused feature map through the Inception Block
-in_fused = inception_block_2(fused_features_1)
-
-
-# 7️⃣ Element-wise multiplication Section 2
-mul_ga_in_fused_rgb = g_attn_rgb * in_fused
-mul_ga_in_fused_ir = g_attn_ir * in_fused
-
-
-# 8️⃣ Concatenate the multiplied values of RGB and IR
-fused_features_2 = torch.cat([mul_ga_in_fused_rgb, mul_ga_in_fused_ir], dim=1)
-
-# Final Convolution to Reduce Channels to 3
-final_conv = nn.Conv2d(in_channels=256, out_channels=3, kernel_size=1)  # Reduce channels to 3
-
-# Apply the final layer
-final_output = final_conv(fused_features_2)
-
-# Print new shape to verify
-print("Final Output Shape:", final_output.shape)  # Expected: [1, 3, 640, 640]
-
-
-# Convert Processed Image for Visualization
-def tensor_to_image(tensor):
-    tensor = tensor.squeeze(0).mean(dim=0)  # Convert (1, C, H, W) → (H, W)
-    tensor = (tensor - tensor.min()) / (tensor.max() - tensor.min())  # Normalize
-    return tensor.cpu().detach().numpy()
-
-# Function to visualize feature maps
-def visualize_feature_map(tensor, title, filename):
-    plt.figure(figsize=(6, 6))
-    plt.imshow(tensor_to_image(tensor), cmap="viridis")
-    plt.title(title)
-    plt.axis("off")
-    plt.show()
-    # Save the image
-    plt.savefig(filename, bbox_inches='tight', pad_inches=0.1)
-    print(f"Saved: {filename}")  # Print confirmation message
-    
-    plt.close()  # Close the figure to prevent memory issues
-    
-
-# Step 1: Print Input Shape
-print("Step 1 - Input Shape (RGB):", input_rgb.shape)  # Expected: (1, 3, 640, 640)
-print("Step 1 - Input Shape (IR):", input_ir.shape)  # Expected: (1, 3, 640, 640)
-
-# Step 2: After Inception Block A
-print("Step 2 - Inception Block Output Shape (RGB):", in_rgb.shape)  # Expected: (1, 128, 640, 640)
-print("Step 2 - Inception Block Output Shape (IR):", in_ir.shape)  # Expected: (1, 128, 640, 640)
-visualize_feature_map(in_rgb, "Inception Output - RGB", "inception_output_rgb.png")
-visualize_feature_map(in_ir, "Inception Output - IR", "inception_output_ir.png")
-
-# Step 3: After Local Attention
-print("Step 3 - Local Attention Output Shape (RGB):", la_attn_rgb.shape)  # Expected: (1, 128, 640, 640)
-print("Step 3 - Local Attention Output Shape (IR):", la_attn_ir.shape)  # Expected: (1, 128, 640, 640)
-visualize_feature_map(la_attn_rgb, "Local Attention - RGB", "local_attention_output_rgb.png")
-visualize_feature_map(la_attn_ir, "Local Attention - IR", "local_attention_output_ir.png")
-
-# Step 4: After Element-Wise Multiplication
-print("Step 4 - Refined Feature Shape (RGB):", mul_la_in_rgb.shape)  # Expected: (1, 128, 640, 640)
-print("Step 4 - Refined Feature Shape (IR):", mul_la_in_ir.shape)  # Expected: (1, 128, 640, 640)
-visualize_feature_map(mul_la_in_rgb, "Refined Features - RGB", "refined_features_rgb.png")
-visualize_feature_map(mul_la_in_ir, "Refined Features - IR", "refined_features_ir.png")
-
-# Step 5: After Concatenation of RGB and IR features
-print("Step 5 - Fused Feature Shape:", fused_features_1.shape)  # Expected: (1, 256, 640, 640)
-visualize_feature_map(fused_features_1, "Fused Features (RGB + IR)", "fused_features_1.png")
-
-# Step 6: After Global Attention
-print("Step 6 - Global Attention Output Shape (RGB):", g_attn_rgb.shape)  # Expected: (1, 128, 640, 640)
-print("Step 6 - Global Attention Output Shape (IR):", g_attn_ir.shape)  # Expected: (1, 128, 640, 640)
-visualize_feature_map(g_attn_rgb, "Global Attention - RGB", "global_attention_output_rgb.png")
-visualize_feature_map(g_attn_ir, "Global Attention - IR", "global_attention_output_ir.png")
-
-# Step 7: After Passing Fused Features through Inception Block A
-print("Step 7 - Inception Output After Fusion Shape:", in_fused.shape)  # Expected: (1, 128, 640, 640)
-visualize_feature_map(in_fused, "Inception After Fusion", "inception_after_fusion.png")
-
-# Step 8: After Multiplication with Global Attention
-print("Step 8 - Global Attention * Inception After Fusion (RGB):", mul_ga_in_fused_rgb.shape)
-print("Step 8 - Global Attention * Inception After Fusion (IR):", mul_ga_in_fused_ir.shape)
-visualize_feature_map(mul_ga_in_fused_rgb, "Global Attention * Inception After Fusion - RGB", "global_attention_rgb_inception_after_fusion_multiplication.png")
-visualize_feature_map(mul_ga_in_fused_ir, "Global Attention * Inception After Fusion - IR", "global_attention_ir_inception_after_fusion_multiplication.png")
-
-# Step 9: fused features Output After Concatenation
-print("Step 9 - Final Output Shape:", fused_features_2.shape)  # Expected: (1, 256, 640, 640)
-visualize_feature_map(fused_features_2, "Final Output Feature Map", "fused_features_2.png")
-
-# Step 10: Final Output After Convolution
-print("Step 10 - Final Output  Shape:", final_output.shape)  # Expected: (1, 3, 640, 640)
-visualize_feature_map(final_output, "Final Output ", "final_output.png")
-
-print("Test Ga")
-visualize_feature_map(ga_test, "Test Output ", "test.png")
+        return final_output  # Shape: (B, 3, H, W)

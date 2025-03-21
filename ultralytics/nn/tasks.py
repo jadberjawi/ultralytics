@@ -85,7 +85,7 @@ from ultralytics.utils.torch_utils import (
     scale_img,
     time_sync,
 )
-
+from ultralytics.mefa.mefa import MEFA
 
 class BaseModel(torch.nn.Module):
     """The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family."""
@@ -146,6 +146,13 @@ class BaseModel(torch.nn.Module):
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
+
+            # print(f"✅ Layer {m.i} Output Shape: {x.shape if isinstance(x, torch.Tensor) else 'None'}")
+            # if x is None:
+            #     print(f"❌ Layer Name: {m.type} is returning None")
+            # else:
+            #     print(f"✅ Layer Name: {m.type} is returning a list of {len(x)} tensors")
+
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -153,6 +160,7 @@ class BaseModel(torch.nn.Module):
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max(embed):
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        # print(f"✅ _predict_once Output Shape: {x.shape if isinstance(x, torch.Tensor) else 'list' if isinstance(x, list) else 'None'}")
         return x
 
     def _predict_augment(self, x):
@@ -294,7 +302,7 @@ class BaseModel(torch.nn.Module):
 class DetectionModel(BaseModel):
     """YOLO detection model."""
 
-    def __init__(self, cfg="yolo11n.yaml", ch=4, nc=None, verbose=True):  # model, input channels, number of classes
+    def __init__(self, cfg="yolo11n.yaml", ch=3, nc=None, verbose=True):  # model, input channels, number of classes
         """Initialize the YOLO detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
@@ -310,7 +318,12 @@ class DetectionModel(BaseModel):
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+        # MODIFICATION HERE: Insert MEFA before the rest of the model
+        self.MEFA = MEFA()
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=3, verbose=verbose)  # model, savelist
+        # MODIFICATION HERE: Insert MEFA as the first layer in the model
+        # self.model.insert(0, self.early_attention)  # Add as the first layer
+
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
@@ -325,9 +338,18 @@ class DetectionModel(BaseModel):
                 """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
                 if self.end2end:
                     return self.forward(x)["one2many"]
-                return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+                
+                # MODIFICATIONS HERE: Bypass MEFA for forward pass
+                out = self._predict_once(x)
 
-            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+                if isinstance(out, list):
+                    print(f"🔍 _forward() received multi-scale output from Detect head with {len(out)} tensors")
+                    return out[0]
+                return out
+                # return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+
+            # MODIFICATION HERE: change to predict once to by pass MEFA
+            m.stride = torch.tensor([s / x.shape[-2] for x in self._predict_once(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -338,7 +360,44 @@ class DetectionModel(BaseModel):
         if verbose:
             self.info()
             LOGGER.info("")
+    def forward(self, x, *args, **kwargs):
+        batch = x  # Preserve batch dictionary
 
+        if isinstance(x, dict):  # Expected input format during training
+            x = x["img"]  # Extract only the image tensor
+
+        x = self.MEFA(x)  # Apply early attention
+
+        if self.training:
+            out = self._predict_once(x)  # Run YOLO
+            return self.loss(batch, out)  # Return loss during training
+        
+        # During inference, use `predict()` like in `BaseModel` for the augment flag to work normally
+        return self.predict(x, *args, **kwargs)
+
+    # def forward(self, x):
+    #     batch = x  # Keep original batch
+
+    #     if isinstance(x, dict):
+    #         x = x["img"]  # Extract image batch from YOLO's dataset dictionary
+    #     # print(f"Before MEFA: {x.shape}")
+    #     x = self.MEFA(x)
+    #     # print(f"After MEFA: {x.shape}")
+
+    #     out = self._predict_once(x)  # Run YOLO
+
+    #     # if self.training:
+    #     #     print(f"🟢 Debug in forward the batch type: {type(x)}")  # Check if batch is tensor or dict
+    #     #     print(f"🟢 Debug in forward the out type: {type(out)}")  # Check what YOLO is returning
+
+    #     #     loss = self.loss(x, out)  # Compute loss
+    #     #     return loss, out
+
+    #     if self.training:
+    #         return self.loss(batch, out)
+
+    #     return out  # During inference, return only predictions
+        
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
         if getattr(self, "end2end", False) or self.__class__.__name__ != "DetectionModel":
@@ -933,7 +992,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     if scales:
         scale = d.get("scale")
         if not scale:
-            scale = tuple(scales.keys())[3] # HERE CHANGE THE SCALE
+            scale = tuple(scales.keys())[1] # HERE CHANGE THE SCALE
             LOGGER.warning(f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}'.")
         depth, width, max_channels = scales[scale]
 

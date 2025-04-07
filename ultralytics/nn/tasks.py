@@ -86,6 +86,7 @@ from ultralytics.utils.torch_utils import (
     time_sync,
 )
 from ultralytics.mefa.mefa import MEFA
+from ultralytics.rsr.rsr import RSR
 
 class BaseModel(torch.nn.Module):
     """The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family."""
@@ -319,6 +320,7 @@ class DetectionModel(BaseModel):
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
         # MODIFICATION HERE: Insert MEFA before the rest of the model
+        self.RSR = RSR()
         self.MEFA = MEFA()
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=3, verbose=verbose)  # model, savelist
         # MODIFICATION HERE: Insert MEFA as the first layer in the model
@@ -365,7 +367,8 @@ class DetectionModel(BaseModel):
 
         if isinstance(x, dict):  # Expected input format during training
             x = x["img"]  # Extract only the image tensor
-
+        
+        X = self.RSR(x)  # Apply redundant spectrum removal
         x = self.MEFA(x)  # Apply early attention
 
         if self.training:
@@ -992,7 +995,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     if scales:
         scale = d.get("scale")
         if not scale:
-            scale = tuple(scales.keys())[1] # HERE CHANGE THE SCALE
+            scale = tuple(scales.keys())[2] # HERE CHANGE THE SCALE
             LOGGER.warning(f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}'.")
         depth, width, max_channels = scales[scale]
 

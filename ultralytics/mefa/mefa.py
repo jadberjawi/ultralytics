@@ -72,7 +72,7 @@ class LocalAttention(nn.Module):
         return attn
 
 class GlobalAttention(nn.Module):
-    def __init__(self, in_channels, num_partitions=(5, 10)):  # 5 rows, 10 columns
+    def __init__(self, in_channels, num_partitions=(8, 8)):  # 5 rows, 10 columns
         super(GlobalAttention, self).__init__()
         self.num_partitions = num_partitions  # Defines partitioning of the feature map
 
@@ -153,6 +153,10 @@ class MEFA(nn.Module):
         ga_rgb = self.global_attn(f_rgb)
         ga_ir = self.global_attn(f_ir)
 
+        # Normalize Global Attention Using Sigmoid
+        ga_rgb = torch.sigmoid(ga_rgb)
+        ga_ir = torch.sigmoid(ga_ir)
+
         # Upscale Attention Maps to Match Input Size
         ga_rgb = F.interpolate(ga_rgb, size=(x.shape[2], x.shape[3]), mode="bilinear", align_corners=False)
         ga_ir = F.interpolate(ga_ir, size=(x.shape[2], x.shape[3]), mode="bilinear", align_corners=False)
@@ -161,8 +165,8 @@ class MEFA(nn.Module):
         refined_features = self.inception_fused(fused_features)
 
         # Apply Global Attention
-        final_rgb = refined_features * ga_rgb
-        final_ir = refined_features * ga_ir
+        final_rgb = refined_features * ga_rgb + refined_features
+        final_ir = refined_features * ga_ir + refined_features
 
         # Concatenate Final Features
         fused_output = torch.cat([final_rgb, final_ir], dim=1)
